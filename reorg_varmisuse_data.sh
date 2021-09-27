@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Set this to the path of the downloaded dataset:
-DOWNLOADED_ZIP="graph-dataset.zip"
+DOWNLOADED_ZIP="./data/varmisuse/graph-dataset.zip"
 # Set this to the path where the data will be extracted to (requires ~15 GB of space):
-OUTDIR="reorged-varmisuse-dataset"
+OUTDIR="./data/varmisuse"
 
 ### The following bits should not require any changes:
 CODEDIR=$(dirname $0)
