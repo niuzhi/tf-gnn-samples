@@ -11,6 +11,7 @@ from dpu_utils.utils import ThreadedIterator, RichPath
 
 from tasks import Sparse_Graph_Task, DataFold
 from utils import get_activation
+import json
 
 
 class Sparse_Graph_Model(ABC):
@@ -376,9 +377,20 @@ class Sparse_Graph_Model(ABC):
             data = self.task._loaded_data.get(DataFold.TEST)
             if data is None:
                 data = self.task.load_eval_data_from_path(path)
-            test_loss, test_task_metrics, test_num_graphs, _, _, _ = \
-                self.__run_epoch("Test", data, DataFold.TEST, quiet=quiet)
-            if not quiet:
-                print("\r\x1b[K", end='')
-            self.log_line("Loss %.5f on %i graphs" % (test_loss, test_num_graphs))
-            self.log_line("Metrics: %s" % self.task.pretty_print_epoch_task_metrics(test_task_metrics, test_num_graphs))
+            try:
+                test_loss, test_task_metrics, test_num_graphs, _, _, _ = \
+                    self.__run_epoch("Test", data, DataFold.TEST, quiet=quiet)
+                if not quiet:
+                    print("\r\x1b[K", end='')
+                self.log_line("Loss %.5f on %i graphs" % (test_loss, test_num_graphs))
+                self.log_line("Metrics: %s" % self.task.pretty_print_epoch_task_metrics(test_task_metrics, test_num_graphs))
+                result = {'path': path.path, 'Num': test_num_graphs, 'Acc': self.task.
+                               pretty_print_epoch_task_metrics(test_task_metrics, test_num_graphs)}
+            except:
+                result = {'path': path.path, 'Num': 0}
+        if not os.path.exists('./results'):
+            os.makedirs('./results')
+        with open('./results/%s_test_results.json' % path.path.replace('/', '_').replace('.', ''), 'w') as f:
+            json.dump(result, f)
+
+

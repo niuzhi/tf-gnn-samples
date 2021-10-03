@@ -9,10 +9,12 @@ import gc
 import networkx as nx
 from networkx.drawing.nx_pydot import write_dot
 import numpy as np
+from tasks.varmisuse_task import _add_per_subtoken_nodes
+from dpu_utils.codeutils import get_language_keywords
 
 colors = {'Child': 'black', 'ReturnsTo': 'forestgreen', 'NextToken': 'red', 'FormalArgName': 'blue',
           'GuardedByNegation': 'gray', 'ComputedFrom': 'chocolate', 'GuardedBy': 'darkorange',
-          'LastUse': 'darkolivegreen', 'LastLexicalUse': 'teal', 'LastWrite': 'magenta'}
+          'LastUse': 'darkolivegreen', 'LastLexicalUse': 'teal', 'LastWrite': 'magenta', 'UsesSubtoken': 'yellow'}
 
 # colors = ["lightcoral", "gray", "lightgray", "firebrick", "red", "chocolate", "darkorange",
 #           "moccasin", "gold", "yellow", "darkolivegreen", "chartreuse", "forestgreen", "lime",
@@ -147,18 +149,20 @@ def get_shortest_length():
     files_dict['graphs-valid'] = os.listdir('./data/varmisuse/graphs-valid')
     files_dict['graphs-test'] = os.listdir('./data/varmisuse/graphs-test')
     files_dict['graphs-testonly'] = os.listdir('./data/varmisuse/graphs-testonly')
+    no_subtoken = False
+    no_write_dot = True
     for key in files_dict.keys():
         for file in files_dict[key]:
             samples = load_jsonl_gz(os.path.join('./data/varmisuse', key, file))
-            results = parallel_process(samples, single_instance_get_shortest_length, key + ':' + file, args=(),
-                                       n_cores=None)
+            results = parallel_process(samples, single_instance_get_shortest_length, key + ':' + file,
+                                       args=(no_subtoken, no_write_dot), n_cores=None)
             save_jsonl_gz(results, os.path.join('./data/varmisuse', key, file))
             gc.collect()
 
 
 def parallel_process(array, func, file, args=(), n_cores=None):
     if n_cores is 1:
-        return [func(x, *args) for x in tqdm(array)]
+        return [func(x, *args) for x in tqdm(array, desc=file)]
     with tqdm(total=len(array), desc=file) as pbar:
         def update(*args):
             pbar.update()
@@ -172,15 +176,18 @@ def parallel_process(array, func, file, args=(), n_cores=None):
         return results
 
 
-def single_instance_get_shortest_length(sample):
+def single_instance_get_shortest_length(sample, no_subtoken, no_write_dot):
     index = sample['index']
+    if not no_subtoken:
+        build_subtoken_edge(sample)
     context_graph = sample['ContextGraph']
     symbol_cands = sample['SymbolCandidates']
     slot_dummy_node = sample['SlotDummyNode']
     cur_graph, symbol_dummy_nodes_correct = build_networkx_graph(index, context_graph, symbol_cands, slot_dummy_node)
     if not os.path.exists('./data/varmisuse/dots'):
         os.makedirs('./data/varmisuse/dots')
-    write_dot(cur_graph, os.path.join('./data/varmisuse/dots', str(index) + '.dot'))
+    if not no_write_dot:
+        write_dot(cur_graph, os.path.join('./data/varmisuse/dots', str(index) + '.dot'))
     cur_graph_undirected = cur_graph.to_undirected()
     for symbol_cand in symbol_cands:
         if symbol_dummy_nodes_correct[symbol_cand['SymbolDummyNode']]:
@@ -207,40 +214,53 @@ def single_instance_get_shortest_length(sample):
     return sample
 
 
-def filter_on_path_length(bins=[1, 6, 10, 20, 50, 100, math.inf]):
+def build_subtoken_edge(sample):
+    unsplittable_keywords = get_language_keywords('csharp')
+    _add_per_subtoken_nodes(unsplittable_keywords, sample['ContextGraph'])
+
+
+def filter_on_path_length(bins=[1, 3, 5, 6, 7, 8, 10]):
     files_dict = {}
     files_dict['graphs-test'] = os.listdir('./data/varmisuse/graphs-test')
     files_dict['graphs-testonly'] = os.listdir('./data/varmisuse/graphs-testonly')
     for key in files_dict.keys():
         all_filter_results = {}
+        all_filter_count = {}
         for i in range(len(bins)):  # the last index is unreachable
-            all_filter_results[i] = []
+            all_filter_count[i] = 0
         for file in files_dict[key]:
+            for i in range(len(bins)):  # the last index is unreachable
+                all_filter_results[i] = []
             samples = load_jsonl_gz(os.path.join('./data/varmisuse', key, file))
             results = parallel_process(samples, single_instance_filter_on_path_length, key + ':' + file,
-                                       args=(bins, ), n_cores=1)
+                                       args=(bins, ), n_cores=None)
             for result in results:
                 for index in result.keys():
                     if bool(result[index]):
                         all_filter_results[index].extend(result[index])
-        for index in all_filter_results.keys():
+            for index in all_filter_results.keys():
+                all_filter_count[index] += len(all_filter_results[index])
+                if index == len(bins) - 1:
+                    if not os.path.exists(
+                            os.path.join('./data/varmisuse/threshold_unreachable/%s' % key)):
+                        os.makedirs(
+                            os.path.join('./data/varmisuse/threshold_unreachable/%s' % key))
+                    save_jsonl_gz(all_filter_results[index],
+                                  os.path.join('./data/varmisuse/threshold_unreachable/%s' % key, file))
+                    print('%s threshold_%s has %d remaining samples' % (file, 'unreachable', len(all_filter_results[index])))
+                else:
+                    if not os.path.exists(os.path.join('./data/varmisuse/threshold_%s_%s/%s' % (str(bins[index]), str(bins[index + 1]), key))):
+                        os.makedirs(os.path.join('./data/varmisuse/threshold_%s_%s/%s' % (str(bins[index]), str(bins[index + 1]), key)))
+                    save_jsonl_gz(all_filter_results[index],
+                                  os.path.join('./data/varmisuse/threshold_%s_%s/%s' % (str(bins[index]), str(bins[index + 1]), key), file))
+                    print('%s threshold_%s_%s has %d remaining samples' % (file, str(bins[index]), str(bins[index + 1]),
+                                                                           len(all_filter_results[index])))
+        for index in all_filter_count.keys():
             if index == len(bins) - 1:
-                if not os.path.exists(
-                        os.path.join('./data/varmisuse/threshold_unreachable/%s' % key)):
-                    os.makedirs(
-                        os.path.join('./data/varmisuse/threshold_unreachable/%s' % key))
-                save_jsonl_gz(all_filter_results[index],
-                              os.path.join('./data/varmisuse/threshold_unreachable/%s' % key,
-                                           'remaining_data.jsonl.gz'))
-                print('%s %s has %d remaining samples' % (key, 'unreachable', len(all_filter_results[index])))
+                print('Totally %s threshold_%s has %d remaining samples' % (key, 'unreachable', all_filter_count[index]))
             else:
-                if not os.path.exists(os.path.join('./data/varmisuse/threshold_%s_%s/%s' % (str(bins[index]), str(bins[index + 1]), key))):
-                    os.makedirs(os.path.join('./data/varmisuse/threshold_%s_%s/%s' % (str(bins[index]), str(bins[index + 1]), key)))
-                save_jsonl_gz(all_filter_results[index],
-                              os.path.join('./data/varmisuse/threshold_%s_%s/%s' % (str(bins[index]), str(bins[index + 1]), key),
-                                           'remaining_data.jsonl.gz'))
-                print('%s threshold_%s_%s has %d remaining samples' % (key, str(bins[index]), str(bins[index + 1]),
-                                                                       len(all_filter_results[index])))
+                print('Totally %s threshold_%s_%s has %d remaining samples' % (key, str(bins[index]), str(bins[index + 1]),
+                                                                               all_filter_count[index]))
 
 
 def single_instance_filter_on_path_length(sample, bins):
@@ -269,7 +289,7 @@ def single_instance_filter_on_path_length(sample, bins):
                     flag = False
                     break
             else:
-                if bins[index] < path <= bins[index + 1]:
+                if bins[index] < path or path == 0:
                     continue
                 else:
                     flag = False
@@ -289,7 +309,7 @@ def minimum_in_range(minimum_value, bins):
             continue
 
 
-def test():
+def statistics():
     files_dict = {}
     files_dict['graphs-train'] = os.listdir('./data/varmisuse/graphs-train')
     files_dict['graphs-valid'] = os.listdir('./data/varmisuse/graphs-valid')
@@ -302,14 +322,40 @@ def test():
             for sample in tqdm(samples, desc=key + ':' + file):
                 symbol_candidates = sample['SymbolCandidates']
                 for symbol_candidate in symbol_candidates:
-                    lengths.append(symbol_candidate['PathLength'])
+                    if symbol_candidate['PathLength'] != 0:
+                        lengths.append(symbol_candidate['PathLength'])
     arr = np.array(lengths)
     print("mean length %f, max length %f, min length %f " % (np.mean(arr), np.max(arr), np.min(arr)))
+
+
+def test():
+    files_dict = {}
+    files_dict['graphs-test'] = os.listdir('./data/varmisuse/graphs-test')
+    files_dict['graphs-testonly'] = os.listdir('./data/varmisuse/graphs-testonly')
+    for key in files_dict.keys():
+        count_dict = {}
+        for x in range(1, 8):
+            count_dict[x] = 0
+        for file in files_dict[key]:
+            samples = load_jsonl_gz(os.path.join('./data/varmisuse', key, file))
+            for sample in tqdm(samples, desc=key + ':' + file):
+                path_length = []
+                symbol_candidates = sample['SymbolCandidates']
+                for symbol_candidate in symbol_candidates:
+                     path_length.append(symbol_candidate['PathLength'])
+                if len(list(set(path_length))) == 1:
+                    index = int(path_length[0])
+                    if index in count_dict.keys():
+                        count_dict[index] += 1
+                else:
+                    continue
+        print(count_dict)
 
 
 if __name__ == '__main__':
     # get_dataset_num()
     # add_index()
     # get_shortest_length()
+    # statistics()
     # filter_on_path_length()
     test()
